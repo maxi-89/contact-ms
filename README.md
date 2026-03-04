@@ -1,140 +1,213 @@
-# openspec — AI Development Template
+# contact-ms
 
-A reusable base template for AI-assisted development with Claude Code. Includes specs, agents, and commands for serverless TypeScript backends and Next.js frontends.
+Serverless microservice that handles contact form submissions from the Celia website. It validates requests, applies rate limiting, and delivers them asynchronously via SES email.
 
-## Stack
+## How it works
 
-| Layer | Technology |
+```
+Client → API Gateway → Lambda Authorizer (origin check)
+                              ↓
+                     receiveMessage handler
+                              ↓
+                    Validate input fields
+                              ↓
+                   Check rate limit (DynamoDB)
+                              ↓
+                      Enqueue to SQS
+                              ↓
+                   sendEmail handler (SQS trigger)
+                              ↓
+                       Send email via SES
+```
+
+## API
+
+### `POST /message`
+
+Receives a contact message from the website form.
+
+**Request**
+```json
+{
+  "name": "John",
+  "lastname": "Doe",
+  "email": "john@example.com",
+  "phone": "+1-555-0100",
+  "message": "Hello, I would like to get in touch."
+}
+```
+
+| Field | Required | Rules |
+|---|---|---|
+| `name` | yes | 2–100 characters |
+| `lastname` | yes | 2–100 characters |
+| `email` | yes | valid email format |
+| `phone` | yes | 6–20 characters |
+| `message` | yes | 10–1000 characters |
+
+**Responses**
+
+| Status | Condition |
 |---|---|
-| Backend | Serverless Framework v3 · TypeScript · AWS Lambda · API Gateway · DynamoDB |
-| Frontend | Next.js (App Router) · TypeScript · Tailwind CSS |
-| Testing | Jest · React Testing Library · Playwright |
+| `200 OK` | Message received and enqueued |
+| `400 Bad Request` | Validation error |
+| `403 Forbidden` | Origin not in allowlist |
+| `429 Too Many Requests` | Rate limit exceeded |
+| `500 Internal Server Error` | Unexpected error |
 
-## What's included
+### `POST /project-request`
 
-```
-openspec/
-├── config.yaml                   # AI context: stack, conventions, rules
-├── specs/
-│   ├── base-standards.mdc        # Core principles for all agents
-│   ├── backend-standards.mdc     # DDD architecture, Lambda, DynamoDB, testing
-│   ├── frontend-standards.mdc    # Next.js App Router, Tailwind, components
-│   ├── documentation-standards.mdc
-│   ├── api-spec.yml              # OpenAPI 3.0 template
-│   ├── data-model.md             # DynamoDB single-table design template
-│   └── development_guide.md      # Setup and deploy guide
-├── .agents/
-│   ├── backend-developer.md      # Plans backend features (DDD + Lambda)
-│   ├── frontend-developer.md     # Plans frontend features (Next.js + Tailwind)
-│   └── product-strategy-analyst.md
-└── .commands/
-    ├── plan-backend-ticket.md
-    ├── plan-frontend-ticket.md
-    ├── develop-backend.md
-    ├── develop-frontend.md
-    ├── commit.md
-    ├── enrich-us.md
-    ├── explain.md
-    ├── meta-prompt.md
-    └── update-docs.md
-```
+_(Coming in next release)_ Receives a project inquiry.
 
-## Usage
+## Rate Limiting
 
-### 1. Copy into your project
+Enforced via DynamoDB before each enqueue:
 
-```bash
-cp -r openspec/ your-project/
-cp CLAUDE.md your-project/
-```
-
-### 2. Update project-specific files
-
-| File | What to update |
+| Rule | Value |
 |---|---|
-| `CLAUDE.md` | Section 3 — project name and description |
-| `openspec/config.yaml` | Project context if needed |
-| `openspec/specs/api-spec.yml` | Your API endpoints |
-| `openspec/specs/data-model.md` | Your DynamoDB schema |
-| `openspec/specs/development_guide.md` | Your setup steps |
+| Max requests per IP per hour | 5 |
+| Max requests per email per hour | 2 |
+| Min seconds between requests from same IP | 300 |
+| On DynamoDB error | Fail open (log and allow) |
 
-### 3. Use the commands
+## Tech Stack
 
-```bash
-# Enrich a ticket before planning
-/enrich-us TICKET-123
+| Concern | Technology |
+|---|---|
+| Runtime | Node.js 22.x |
+| Language | TypeScript (strict) |
+| Framework | Serverless Framework v3 |
+| Compute | AWS Lambda |
+| API | AWS API Gateway (REST) |
+| Queue | AWS SQS |
+| Email | AWS SES |
+| Rate limiting | AWS DynamoDB |
+| Testing | Jest + ts-jest |
 
-# Generate an implementation plan
-/plan-backend-ticket TICKET-123
-/plan-frontend-ticket TICKET-123
-
-# Implement following the plan
-/develop-backend TICKET-123
-/develop-frontend TICKET-123
-
-# Commit and open PR
-/commit TICKET-123
-
-# Update documentation after changes
-/update-docs
-
-# Explain a concept
-/explain "What is single-table design?"
-
-# Improve a prompt
-/meta-prompt "your rough prompt here"
-```
-
-### Typical workflow
-
-```
-/enrich-us TICKET-123            → refine the story
-/plan-backend-ticket TICKET-123  → generate step-by-step plan
-/develop-backend TICKET-123      → implement (reads the plan, follows TDD)
-/commit TICKET-123               → conventional commit + PR
-```
-
-Plans are saved to `openspec/changes/`.
-
-## Architecture
-
-### Backend (DDD layers)
+## Project Structure
 
 ```
 src/
-├── presentation/handlers/    # Lambda handlers — no business logic
-├── application/services/     # Orchestration — no AWS SDK imports
-├── application/validators/   # unknown → typed object | ValidationError
-├── domain/models/            # Entities — zero external dependencies
-├── domain/repositories/      # Interfaces only
-├── infrastructure/dynamodb/  # AWS SDK v3, DynamoDBDocumentClient
-└── infrastructure/errors/    # AppError, ValidationError
+├── domain/
+│   └── models/
+│       └── ContactMessage.ts         # Domain entity — zero external deps
+├── application/
+│   ├── validators/
+│   │   └── contactMessageValidator.ts
+│   └── services/
+│       └── contactMessageService.ts  # Orchestration — no AWS SDK imports
+├── infrastructure/
+│   ├── aws/
+│   │   ├── dynamodbClient.ts
+│   │   ├── sqsClient.ts
+│   │   └── sesClient.ts
+│   ├── middleware/
+│   │   └── rateLimit.ts
+│   ├── http/
+│   │   └── response.ts
+│   └── errors/
+│       ├── AppError.ts
+│       └── ValidationError.ts
+└── presentation/
+    ├── handlers/
+    │   ├── authorizer.ts             # REQUEST-type Lambda Authorizer
+    │   ├── receiveMessage.ts         # POST /message
+    │   ├── sendEmail.ts              # SQS trigger → SES
+    │   └── receiveProjectRequest.ts  # (coming soon)
+    └── templates/
+        └── emailTemplate.html
 ```
 
-### Frontend (Next.js App Router)
+## Local Setup
 
+### Prerequisites
+
+- Node.js v22+
+- Java 8+ (required for DynamoDB Local)
+- AWS CLI configured (`aws configure`)
+- Serverless Framework: `npm install -g serverless`
+
+### Install
+
+```bash
+git clone git@github.com:maxi-89/contact-ms.git
+cd contact-ms
+npm install
 ```
-app/[route]/page.tsx      # Server Component — async, fetches data directly
-components/ui/            # Primitive presentational components
-components/[feature]/     # Feature-specific components
-lib/api/                  # API service modules — all fetch calls go here
-hooks/                    # Client-side custom hooks
-types/                    # Shared TypeScript interfaces
+
+### Environment
+
+```bash
+cp .env.example .env
 ```
 
-## Standards
+Edit `.env` with your values:
 
-- **TDD** — failing test first, always
-- **Coverage** — 90% minimum (branches, functions, lines, statements)
-- **TypeScript** — strict mode, no `any`
-- **Commits** — Conventional Commits (`feat(scope): description`)
-- **Branches** — `feature/[ticket-id]-backend` / `feature/[ticket-id]-frontend`
-- **Language** — English only (code, docs, commits, tests)
+```env
+REGION=us-east-1
+PENDING_MESSAGES_QUEUE=https://sqs.us-east-1.amazonaws.com/123456789/my-queue
+EMAIL_SOURCE=no-reply@example.com
+DESTINATION_EMAIL=contact@example.com
+CLOUDFRONT_DOMAIN=d1234abcd.cloudfront.net
+RATE_LIMIT_TABLE=contact-ms-dev-rate-limit
+DYNAMODB_ENDPOINT=http://localhost:8000
+IS_OFFLINE=true
+```
 
-## Requirements
+### Run locally
 
-- [Claude Code](https://claude.ai/code)
-- Node.js v20+
-- AWS CLI configured
-- Serverless Framework v3 (`npm install -g serverless`)
-- GitHub CLI (`gh`)
+```bash
+# Install DynamoDB Local (first time only)
+npx serverless dynamodb install
+
+# Start API Gateway + DynamoDB Local
+npm run offline
+```
+
+API available at `http://localhost:3000`.
+
+## Testing
+
+```bash
+npm test                  # Run all unit tests
+npm run test:coverage     # With coverage report (≥ 90% required)
+npm run type-check        # TypeScript strict check
+npm run lint              # ESLint
+```
+
+Current coverage: **100% statements · 100% functions · 100% lines · 94.2% branches**
+
+## Deploy
+
+```bash
+# Deploy to dev
+npx serverless deploy --stage dev
+
+# Deploy to production
+npx serverless deploy --stage prod
+```
+
+After deploying, the CLI outputs the API Gateway endpoint URL.
+
+## Allowed Origins
+
+The Lambda Authorizer validates the `origin` header on every request. Allowed origins:
+
+- `https://${CLOUDFRONT_DOMAIN}` (configured via env var)
+- `http://localhost:3000`
+- `http://localhost:5173`
+
+All other origins receive `403 Forbidden`.
+
+## Environment Variables
+
+| Variable | Required | Description |
+|---|---|---|
+| `REGION` | yes | AWS region (e.g. `us-east-1`) |
+| `PENDING_MESSAGES_QUEUE` | yes | SQS queue URL |
+| `EMAIL_SOURCE` | yes | SES verified sender address |
+| `DESTINATION_EMAIL` | yes | Recipient for all contact emails |
+| `CLOUDFRONT_DOMAIN` | yes | Allowed origin for the authorizer (without protocol) |
+| `RATE_LIMIT_TABLE` | yes | DynamoDB table name for rate limiting |
+| `DYNAMODB_ENDPOINT` | local only | DynamoDB Local endpoint (default: `http://localhost:8000`) |
+| `IS_OFFLINE` | local only | Set to `true` to use local AWS SDK endpoints |
