@@ -1,0 +1,600 @@
+---
+description: Backend development standards, best practices, and conventions for serverless TypeScript applications on AWS using Serverless Framework, Lambda, API Gateway, and DynamoDB with Domain-Driven Design and clean architecture.
+globs: ["src/**/*.ts", "serverless.yml", "jest.config.ts", "tsconfig.json", "package.json"]
+alwaysApply: true
+---
+
+# Backend Standards — Serverless Framework · TypeScript · AWS
+
+## Table of Contents
+
+- [Technology Stack](#technology-stack)
+- [Architecture Overview](#architecture-overview)
+- [Project Structure](#project-structure)
+- [Domain-Driven Design](#domain-driven-design)
+- [Lambda Handlers (Presentation Layer)](#lambda-handlers-presentation-layer)
+- [Application Layer](#application-layer)
+- [Domain Layer](#domain-layer)
+- [Infrastructure Layer](#infrastructure-layer)
+- [DynamoDB Patterns](#dynamodb-patterns)
+- [Error Handling](#error-handling)
+- [Validation](#validation)
+- [Testing Standards](#testing-standards)
+- [Serverless Framework Configuration](#serverless-framework-configuration)
+- [TypeScript Standards](#typescript-standards)
+- [Git Workflow](#git-workflow)
+
+---
+
+## Technology Stack
+
+| Concern | Technology |
+|---|---|
+| Runtime | Node.js 22.x |
+| Language | TypeScript (strict mode) |
+| Framework | Serverless Framework v3 |
+| Compute | AWS Lambda |
+| API | AWS API Gateway (REST) |
+| Database | AWS DynamoDB |
+| Testing | Jest + ts-jest |
+| Linting | ESLint + Prettier |
+
+---
+
+## Architecture Overview
+
+The backend follows a **layered DDD architecture** adapted for AWS Lambda:
+
+```
+src/
+├── domain/           # Business logic, entities, value objects, repository interfaces
+├── application/      # Use cases, services, validators — orchestrates domain
+├── infrastructure/   # DynamoDB repositories, external adapters, AWS SDK clients
+└── presentation/     # Lambda handlers — thin entry points, delegate to application layer
+```
+
+**Dependency rule**: outer layers depend on inner layers. Domain has zero dependencies on infrastructure or AWS SDK.
+
+```
+presentation → application → domain ← infrastructure
+```
+
+---
+
+## Project Structure
+
+```
+project-name/
+├── src/
+│   ├── domain/
+│   │   ├── models/              # Domain entities and value objects
+│   │   └── repositories/        # Repository interfaces (IFooRepository.ts)
+│   ├── application/
+│   │   ├── services/            # Application services (fooService.ts)
+│   │   └── validators/          # Input validators (fooValidator.ts)
+│   ├── infrastructure/
+│   │   ├── dynamodb/            # DynamoDB client + repository implementations
+│   │   └── errors/              # AppError, ValidationError
+│   └── presentation/
+│       └── handlers/            # Lambda handler functions (createFoo.ts)
+├── __tests__/                   # Unit and integration tests (mirrors src/)
+├── serverless.yml
+├── tsconfig.json
+├── jest.config.ts
+├── .env.example
+└── package.json
+```
+
+---
+
+## Domain-Driven Design
+
+### Entities
+
+Domain entities are plain TypeScript classes or interfaces. They must be **framework-agnostic** — no AWS SDK, no DynamoDB, no HTTP.
+
+```typescript
+// src/domain/models/Foo.ts
+export interface Foo {
+  id: string;
+  name: string;
+  createdAt: string;
+}
+```
+
+Use classes when the entity has behavior or invariants to enforce:
+
+```typescript
+export class Foo {
+  readonly id: string;
+  readonly name: string;
+  readonly createdAt: string;
+
+  constructor(props: { id: string; name: string; createdAt: string }) {
+    if (!props.name || props.name.trim().length === 0) {
+      throw new ValidationError('name is required');
+    }
+    this.id = props.id;
+    this.name = props.name.trim();
+    this.createdAt = props.createdAt;
+  }
+}
+```
+
+### Repository Interfaces
+
+Define repository contracts in the **domain layer**. Infrastructure implements them.
+
+```typescript
+// src/domain/repositories/IFooRepository.ts
+import { Foo } from '../models/Foo';
+
+export interface IFooRepository {
+  save(foo: Foo): Promise<void>;
+  findById(id: string): Promise<Foo | null>;
+  findAll(): Promise<Foo[]>;
+}
+```
+
+### Value Objects
+
+Use value objects for concepts with no identity but specific validation rules:
+
+```typescript
+export class Email {
+  readonly value: string;
+
+  constructor(raw: string) {
+    const normalized = raw.trim().toLowerCase();
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalized)) {
+      throw new ValidationError('Invalid email address');
+    }
+    this.value = normalized;
+  }
+}
+```
+
+---
+
+## Lambda Handlers (Presentation Layer)
+
+Handlers are **thin entry points**. Their only responsibilities:
+1. Parse and validate the HTTP event
+2. Call the application service
+3. Return a properly formatted HTTP response
+
+```typescript
+// src/presentation/handlers/createFoo.ts
+import { APIGatewayProxyHandler, APIGatewayProxyResult } from 'aws-lambda';
+import { createFoo } from '../../application/services/fooService';
+import { AppError } from '../../infrastructure/errors/AppError';
+import { ValidationError } from '../../infrastructure/errors/ValidationError';
+
+export const handler: APIGatewayProxyHandler = async (event): Promise<APIGatewayProxyResult> => {
+  try {
+    const body = JSON.parse(event.body ?? '{}');
+    const result = await createFoo(body);
+
+    return {
+      statusCode: 201,
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(result),
+    };
+  } catch (error) {
+    if (error instanceof ValidationError) {
+      return {
+        statusCode: 400,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ error: error.message }),
+      };
+    }
+    if (error instanceof AppError) {
+      return {
+        statusCode: error.statusCode,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ error: error.message }),
+      };
+    }
+    console.error('Unhandled error:', error);
+    return {
+      statusCode: 500,
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ error: 'Internal server error' }),
+    };
+  }
+};
+```
+
+**Rules:**
+- No business logic in handlers
+- Always return `APIGatewayProxyResult` with `statusCode`, `headers`, and `body`
+- Always set `Content-Type: application/json`
+- Log unhandled errors with `console.error` before returning 500
+- Parse `event.body` defensively (`?? '{}'`)
+
+---
+
+## Application Layer
+
+Application services orchestrate domain logic. They:
+- Receive plain input objects (not AWS event objects)
+- Validate input using validators
+- Instantiate or retrieve domain entities
+- Call repository interfaces
+- Return plain objects (not domain entities directly)
+
+```typescript
+// src/application/services/fooService.ts
+import { v4 as uuidv4 } from 'uuid';
+import { IFooRepository } from '../../domain/repositories/IFooRepository';
+import { Foo } from '../../domain/models/Foo';
+import { validateCreateFoo } from '../validators/fooValidator';
+import { FooRepository } from '../../infrastructure/dynamodb/FooRepository';
+
+const repository: IFooRepository = new FooRepository();
+
+export async function createFoo(input: unknown): Promise<{ id: string }> {
+  const validated = validateCreateFoo(input);
+
+  const foo = new Foo({
+    id: uuidv4(),
+    name: validated.name,
+    createdAt: new Date().toISOString(),
+  });
+
+  await repository.save(foo);
+
+  return { id: foo.id };
+}
+```
+
+**Rules:**
+- Services receive `unknown` input and validate it before use
+- Services must not import `aws-lambda`, `@aws-sdk/*`, or DynamoDB directly
+- Each service function has a single responsibility
+- Return types must be fully typed (no `any`)
+
+---
+
+## Infrastructure Layer
+
+### DynamoDB Client
+
+```typescript
+// src/infrastructure/dynamodb/dynamodbClient.ts
+import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
+import { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
+
+const client = new DynamoDBClient({
+  region: process.env.AWS_REGION ?? 'us-east-1',
+  ...(process.env.IS_OFFLINE === 'true' && {
+    endpoint: process.env.DYNAMODB_ENDPOINT ?? 'http://localhost:8000',
+    credentials: { accessKeyId: 'local', secretAccessKey: 'local' },
+  }),
+});
+
+export const dynamodb = DynamoDBDocumentClient.from(client);
+```
+
+### Repository Implementation
+
+```typescript
+// src/infrastructure/dynamodb/FooRepository.ts
+import { PutCommand, GetCommand } from '@aws-sdk/lib-dynamodb';
+import { IFooRepository } from '../../domain/repositories/IFooRepository';
+import { Foo } from '../../domain/models/Foo';
+import { dynamodb } from './dynamodbClient';
+
+const TABLE_NAME = process.env.DYNAMODB_TABLE!;
+
+export class FooRepository implements IFooRepository {
+  async save(foo: Foo): Promise<void> {
+    await dynamodb.send(new PutCommand({
+      TableName: TABLE_NAME,
+      Item: {
+        PK: `FOO#${foo.id}`,
+        SK: `FOO#${foo.id}`,
+        id: foo.id,
+        name: foo.name,
+        createdAt: foo.createdAt,
+        entityType: 'FOO',
+      },
+    }));
+  }
+
+  async findById(id: string): Promise<Foo | null> {
+    const result = await dynamodb.send(new GetCommand({
+      TableName: TABLE_NAME,
+      Key: { PK: `FOO#${id}`, SK: `FOO#${id}` },
+    }));
+
+    if (!result.Item) return null;
+
+    return new Foo({
+      id: result.Item.id,
+      name: result.Item.name,
+      createdAt: result.Item.createdAt,
+    });
+  }
+}
+```
+
+---
+
+## DynamoDB Patterns
+
+### Single-Table Design
+
+All entities share one table. Use composite keys to separate entity types:
+
+| Entity | PK | SK |
+|---|---|---|
+| User | `USER#<id>` | `USER#<id>` |
+| Order | `ORDER#<id>` | `ORDER#<id>` |
+| Order by User | `USER#<userId>` | `ORDER#<orderId>` |
+
+Always include `entityType` attribute for filtering.
+
+### Key Rules
+
+- Use `PK` and `SK` as partition and sort key attribute names
+- Prefix keys with entity type in uppercase (`USER#`, `ORDER#`)
+- Add a GSI when you need to query by a non-primary attribute
+- Always set `TABLE_NAME` from `process.env.DYNAMODB_TABLE`
+- Never hardcode table names
+
+### AWS SDK v3
+
+Always use AWS SDK v3 (`@aws-sdk/client-dynamodb` + `@aws-sdk/lib-dynamodb`). Use `DynamoDBDocumentClient` to work with plain JavaScript objects instead of DynamoDB's attribute types.
+
+---
+
+## Error Handling
+
+### Error Classes
+
+```typescript
+// src/infrastructure/errors/AppError.ts
+export class AppError extends Error {
+  constructor(
+    message: string,
+    public readonly statusCode: number = 500
+  ) {
+    super(message);
+    this.name = 'AppError';
+  }
+}
+
+// src/infrastructure/errors/ValidationError.ts
+export class ValidationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ValidationError';
+  }
+}
+```
+
+### HTTP Status Code Mapping
+
+| Error | Status |
+|---|---|
+| `ValidationError` | 400 |
+| Not found | 404 |
+| `AppError` (custom) | per `statusCode` |
+| Unhandled | 500 |
+
+### Response Format
+
+All error responses follow this shape:
+```json
+{ "error": "Human-readable message" }
+```
+
+---
+
+## Validation
+
+Validators live in `src/application/validators/`. They receive `unknown` input and return a typed, validated object — or throw `ValidationError`.
+
+```typescript
+// src/application/validators/fooValidator.ts
+import { ValidationError } from '../../infrastructure/errors/ValidationError';
+
+export interface CreateFooInput {
+  name: string;
+}
+
+export function validateCreateFoo(input: unknown): CreateFooInput {
+  if (typeof input !== 'object' || input === null) {
+    throw new ValidationError('Request body must be a JSON object');
+  }
+
+  const body = input as Record<string, unknown>;
+
+  if (typeof body.name !== 'string' || body.name.trim().length === 0) {
+    throw new ValidationError('name is required and must be a non-empty string');
+  }
+
+  return { name: body.name.trim() };
+}
+```
+
+**Rules:**
+- Validate at the application layer boundary (before domain)
+- Return typed objects from validators, never `any`
+- Throw `ValidationError` with descriptive messages
+- Do not use external validation libraries unless strictly necessary
+
+---
+
+## Testing Standards
+
+### Coverage Threshold
+
+Minimum 90% for branches, functions, lines, and statements.
+
+### Structure
+
+```
+__tests__/
+├── unit/
+│   ├── domain/
+│   ├── application/
+│   └── infrastructure/
+└── integration/     # Optional: tests against DynamoDB Local
+```
+
+### Unit Test Pattern
+
+Follow **AAA (Arrange, Act, Assert)**. Mock all infrastructure dependencies.
+
+```typescript
+// __tests__/unit/application/fooService.test.ts
+import { createFoo } from '../../../src/application/services/fooService';
+import { IFooRepository } from '../../../src/domain/repositories/IFooRepository';
+
+const mockRepository: jest.Mocked<IFooRepository> = {
+  save: jest.fn(),
+  findById: jest.fn(),
+  findAll: jest.fn(),
+};
+
+jest.mock('../../../src/infrastructure/dynamodb/FooRepository', () => ({
+  FooRepository: jest.fn().mockImplementation(() => mockRepository),
+}));
+
+describe('createFoo', () => {
+  beforeEach(() => jest.clearAllMocks());
+
+  it('saves a new Foo and returns its id', async () => {
+    // Arrange
+    mockRepository.save.mockResolvedValue(undefined);
+
+    // Act
+    const result = await createFoo({ name: 'Test' });
+
+    // Assert
+    expect(result.id).toBeDefined();
+    expect(mockRepository.save).toHaveBeenCalledTimes(1);
+  });
+
+  it('throws ValidationError when name is missing', async () => {
+    await expect(createFoo({ name: '' })).rejects.toThrow('name is required');
+  });
+});
+```
+
+### Handler Test Pattern
+
+Test handlers by constructing mock `APIGatewayProxyEvent` objects:
+
+```typescript
+import { handler } from '../../../src/presentation/handlers/createFoo';
+import { APIGatewayProxyEvent } from 'aws-lambda';
+
+const mockEvent = (body: unknown): Partial<APIGatewayProxyEvent> => ({
+  body: JSON.stringify(body),
+  headers: {},
+  httpMethod: 'POST',
+  path: '/foos',
+});
+
+it('returns 201 on valid input', async () => {
+  const result = await handler(mockEvent({ name: 'Test' }) as APIGatewayProxyEvent, {} as any, () => {});
+  expect(result?.statusCode).toBe(201);
+});
+```
+
+---
+
+## Serverless Framework Configuration
+
+### serverless.yml Conventions
+
+```yaml
+service: service-name
+
+frameworkVersion: '3'
+
+provider:
+  name: aws
+  runtime: nodejs22.x
+  stage: ${opt:stage, 'dev'}
+  region: ${opt:region, 'us-east-1'}
+  environment:
+    DYNAMODB_TABLE: ${self:service}-${self:provider.stage}
+  iam:
+    role:
+      statements:
+        - Effect: Allow
+          Action:
+            - dynamodb:PutItem
+            - dynamodb:GetItem
+            - dynamodb:UpdateItem
+            - dynamodb:DeleteItem
+            - dynamodb:Query
+            - dynamodb:Scan
+          Resource:
+            - !GetAtt MainTable.Arn
+            - !Sub '${MainTable.Arn}/index/*'
+
+functions:
+  createFoo:
+    handler: src/presentation/handlers/createFoo.handler
+    events:
+      - http:
+          path: /foos
+          method: post
+          cors: true
+
+resources:
+  Resources:
+    MainTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: ${self:provider.environment.DYNAMODB_TABLE}
+        BillingMode: PAY_PER_REQUEST
+        AttributeDefinitions:
+          - AttributeName: PK
+            AttributeType: S
+          - AttributeName: SK
+            AttributeType: S
+        KeySchema:
+          - AttributeName: PK
+            KeyType: HASH
+          - AttributeName: SK
+            KeyType: RANGE
+
+plugins:
+  - serverless-offline
+  - serverless-dynamodb-local
+```
+
+**Rules:**
+- Always use `PAY_PER_REQUEST` billing mode for new tables
+- Grant least-privilege IAM permissions (list only needed actions)
+- Use `${self:service}-${self:provider.stage}` for table name
+- Enable CORS on all HTTP endpoints
+
+---
+
+## TypeScript Standards
+
+- Use `strict: true` in `tsconfig.json`
+- No `any` — use `unknown` and narrow types
+- Prefer `interface` for object shapes, `type` for unions and primitives
+- All function parameters and return types must be explicitly typed
+- Use `as const` for literal types and enums
+- Never use non-null assertion (`!`) unless the value is guaranteed by contract; add a comment explaining why
+
+---
+
+## Git Workflow
+
+- Branch naming: `feature/<ticket-id>-short-description`, `fix/<ticket-id>-short-description`
+- Commit message format: `<type>(<scope>): <description>` (Conventional Commits)
+  - Types: `feat`, `fix`, `docs`, `refactor`, `test`, `chore`
+  - Example: `feat(contacts): add POST /contacts handler`
+- One feature per branch, small focused commits
+- Always update `openspec/specs/api-spec.yml` when endpoints change
+- Always update `openspec/specs/data-model.md` when DynamoDB schema changes
