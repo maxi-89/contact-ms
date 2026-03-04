@@ -1,0 +1,213 @@
+openapi: 3.0.3
+info:
+  title: contact-ms API
+  description: |
+    Contact microservice for the Celia website.
+    Receives contact messages and project requests, applies rate limiting,
+    and enqueues them for async email delivery via SES.
+  version: 1.0.0
+
+servers:
+  - url: https://{apiId}.execute-api.{region}.amazonaws.com/{stage}
+    variables:
+      apiId:
+        default: your-api-id
+      region:
+        default: us-east-1
+      stage:
+        default: dev
+
+security:
+  - OriginAuthorizer: []
+
+paths:
+  /message:
+    post:
+      summary: Receive a contact message
+      description: |
+        Accepts a contact message from the website form, validates it,
+        applies IP/email rate limiting, and enqueues it for email delivery.
+      operationId: receiveMessage
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ContactMessageRequest'
+      responses:
+        '200':
+          description: Message received and enqueued successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+        '400':
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Forbidden — origin not in allowlist
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '429':
+          description: Rate limit exceeded
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RateLimitErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /project-request:
+    post:
+      summary: Receive a project request
+      description: |
+        Accepts a project request from the website form, validates it,
+        applies IP/email rate limiting, and enqueues it for email delivery.
+      operationId: receiveProjectRequest
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProjectRequestBody'
+      responses:
+        '200':
+          description: Project request received and enqueued successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+        '400':
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Forbidden — origin not in allowlist
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '429':
+          description: Rate limit exceeded
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RateLimitErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+components:
+  securitySchemes:
+    OriginAuthorizer:
+      type: apiKey
+      in: header
+      name: origin
+      description: |
+        REQUEST-type Lambda Authorizer that validates the `origin` header.
+        Allowed origins: `https://${CLOUDFRONT_DOMAIN}`, `http://localhost:3000`,
+        `http://localhost:5173`. All other origins receive a 403 Forbidden response.
+
+  schemas:
+    ContactMessageRequest:
+      type: object
+      required:
+        - name
+        - email
+        - message
+      properties:
+        name:
+          type: string
+          minLength: 2
+          maxLength: 100
+          example: John Doe
+        lastname:
+          type: string
+          minLength: 2
+          maxLength: 100
+          example: Doe
+        email:
+          type: string
+          format: email
+          example: john@example.com
+        phone:
+          type: string
+          minLength: 6
+          maxLength: 20
+          example: '+1-555-0100'
+        message:
+          type: string
+          minLength: 10
+          maxLength: 1000
+          example: Hello, I would like to get in touch.
+
+    ProjectRequestBody:
+      type: object
+      required:
+        - name
+        - email
+        - projectType
+        - description
+      properties:
+        name:
+          type: string
+          minLength: 2
+          maxLength: 100
+          example: Jane Doe
+        email:
+          type: string
+          format: email
+          example: jane@example.com
+        projectType:
+          type: string
+          minLength: 2
+          maxLength: 100
+          example: Website
+        description:
+          type: string
+          minLength: 10
+          maxLength: 2000
+          example: I need a new e-commerce site.
+        budget:
+          type: string
+          maxLength: 100
+          example: '5000-10000'
+
+    MessageResponse:
+      type: object
+      properties:
+        message:
+          type: string
+          example: Message received
+
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: string
+          example: name is required and must be a non-empty string
+
+    RateLimitErrorResponse:
+      type: object
+      properties:
+        error:
+          type: string
+          example: Rate limit exceeded
+        retryAfter:
+          type: integer
+          description: Seconds until the rate limit window resets
+          example: 1843
