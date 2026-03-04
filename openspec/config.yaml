@@ -1,0 +1,40 @@
+schema: spec-driven
+
+context: |
+  ## Backend Stack
+  - Runtime: Node.js 20.x
+  - Language: TypeScript (strict mode)
+  - Framework: Serverless Framework v3
+  - Cloud: AWS (Lambda, API Gateway, DynamoDB, IAM, CloudFormation)
+  - Testing: Jest + ts-jest (90% coverage threshold)
+  - Linting: ESLint + Prettier
+
+  ## Frontend Stack
+  - Framework: Next.js (App Router)
+  - Language: TypeScript (strict mode)
+  - Styling: Tailwind CSS
+  - Testing: Jest + React Testing Library / Playwright for E2E
+
+  ## Architecture
+  - Backend follows Domain-Driven Design (DDD) with layered architecture:
+    Domain → Application → Infrastructure → Presentation (Lambda handlers)
+  - Single-table DynamoDB design pattern
+  - REST API exposed via API Gateway
+  - Frontend uses Next.js App Router with Server and Client Components
+
+  ## Conventions
+  - All code, docs, commits, and test names in English
+  - Conventional commits (feat, fix, docs, refactor, test, chore)
+  - TDD: write failing tests first
+  - Small, incremental changes — one task at a time
+  - Full TypeScript strict typing throughout
+
+rules:
+  proposal:
+    - Keep proposals focused on one feature or concern
+    - Always include a "Non-goals" section
+    - Identify which stack (backend/frontend/both) is affected
+  tasks:
+    - Break tasks into steps of max 2 hours
+    - Each task must reference affected files
+    - First task is always: write failing tests
